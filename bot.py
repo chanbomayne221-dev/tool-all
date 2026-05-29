@@ -80,18 +80,22 @@ def has_perm(uid: int, perm: str) -> bool:
 
 # ─── keyboards ──────────────────────────────────────────
 def kb_main():
-    # Reply keyboard (gắn dưới bàn phím chat)
-    return ReplyKeyboardMarkup([
-        ["🛡 CHECK JOIN", "🤖 AUTO"],
-        ["🎯 REF", "💬 SEX SPAM"],
-        ["🚪 JOIN GROUP", "👤 QUẢN LÝ ACC"],
-        ["🛠 QUẢN LÝ ADMIN"],
-        ["📜 LOGS", "📊 STATUS"],
-        ["⛔ STOP TASK", "🏠 HOME"],
-    ], resize_keyboard=True, is_persistent=True)
+    # Inline keyboard – gắn ngay trong tin nhắn menu (giống bot bình thường)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛡 CHECK JOIN", callback_data="m:check"),
+         InlineKeyboardButton("🤖 AUTO",       callback_data="m:auto")],
+        [InlineKeyboardButton("🎯 REF",        callback_data="m:ref"),
+         InlineKeyboardButton("💬 SEX SPAM",   callback_data="m:spam")],
+        [InlineKeyboardButton("🚪 JOIN GROUP", callback_data="m:join"),
+         InlineKeyboardButton("👤 QUẢN LÝ ACC", callback_data="m:acc")],
+        [InlineKeyboardButton("🛠 QUẢN LÝ ADMIN", callback_data="m:admins")],
+        [InlineKeyboardButton("📜 LOGS",   callback_data="m:logs"),
+         InlineKeyboardButton("📊 STATUS", callback_data="m:status")],
+        [InlineKeyboardButton("⛔ STOP TASK", callback_data="m:stop")],
+    ])
 
 
-# Map text bàn phím -> callback action
+# Giữ map cũ để tương thích (nếu user vẫn còn reply keyboard cũ)
 REPLY_TEXT_MAP = {
     "🛡 CHECK JOIN": "m:check",
     "🤖 AUTO":       "m:auto",
@@ -105,6 +109,9 @@ REPLY_TEXT_MAP = {
     "⛔ STOP TASK": "m:stop",
     "🏠 HOME": "m:home",
 }
+
+# Các step đang chờ user nhập NỘI DUNG TỰ DO (cho phép cả /command)
+FREEFORM_STEPS = {"spam.msg"}
 
 
 
@@ -165,7 +172,23 @@ async def show_home(update: Update):
         "Mỗi bước sẽ được hỏi tuần tự giống tool Termux.\n\n"
         f"👮 Admin: <code>{', '.join(map(str, ADMIN_IDS))}</code>"
     )
-    await send(update, text, kb_main())
+    # Nếu là callback (bấm nút) -> edit message hiện tại
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                text, reply_markup=kb_main(), parse_mode=ParseMode.HTML)
+            return
+        except Exception:
+            pass
+    # Nếu là /start hoặc tin nhắn -> gỡ reply keyboard cũ rồi gửi menu inline
+    try:
+        await update.effective_chat.send_message(
+            "…", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
+    await update.effective_chat.send_message(
+        text, reply_markup=kb_main(), parse_mode=ParseMode.HTML)
+
 
 
 # ─── log streaming ──────────────────────────────────────
@@ -236,8 +259,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"❌ Bạn không có quyền.\nUser ID: <code>{uid}</code>",
             parse_mode=ParseMode.HTML)
         return
-    st(uid)  # init
+    s = st(uid)
+    # Nếu đang ở step nhập nội dung tự do (vd SEX SPAM nội dung) thì
+    # nhận "/start" như text user gõ, KHÔNG về menu chính.
+    if s.step in FREEFORM_STEPS:
+        await on_text(update, ctx)
+        return
     await show_home(update)
+
 
 
 # ─── dispatch (dùng chung cho callback + reply keyboard) ─
@@ -921,22 +950,36 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(uid):
         return
     s = st(uid)
-    txt = (update.message.text or "").strip()
+    txt = (update.message.text or "")
 
-    # Bàn phím chính – ưu tiên cao nhất, huỷ step hiện tại
-    if txt in REPLY_TEXT_MAP:
-        action = REPLY_TEXT_MAP[txt]
+    # Nếu đang ở step nhập nội dung tự do -> nhận nguyên văn (kể cả "/start")
+    if s.step in FREEFORM_STEPS:
+        try:
+            if s.step.startswith("spam."):
+                await step_spam(update, ctx, txt)
+        except Exception as e:
+            log.exception("freeform step error")
+            await update.message.reply_text(f"❌ Lỗi: {e}")
+            s.step = None
+        return
+
+    txt_s = txt.strip()
+    # Bàn phím cũ (nếu còn) – huỷ step hiện tại
+    if txt_s in REPLY_TEXT_MAP:
+        action = REPLY_TEXT_MAP[txt_s]
         s.step = None
         s.data.clear()
         await dispatch_action(update, ctx, action)
         return
 
     if not s.step:
-        await update.message.reply_text("Dùng menu bên dưới 👇",
-                                        reply_markup=kb_main())
+        # Bỏ qua các /command rời rạc khi không có step
+        if txt_s.startswith("/"):
+            return
+        await show_home(update)
         return
 
-    txt = update.message.text or ""
+
     try:
         if s.step.startswith("check."):   await step_check(update, ctx, txt)
         elif s.step.startswith("auto."):  await step_auto(update, ctx, txt)
@@ -1310,7 +1353,9 @@ def main():
     app.add_handler(CallbackQueryHandler(on_del_pick, pattern=r"^acc:delpick:"))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    # Nhận cả /command để các step nhập nội dung tự do (vd SEX SPAM) không bị mất
+    app.add_handler(MessageHandler(filters.TEXT, on_text))
+
     log.info("Bot starting…")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
