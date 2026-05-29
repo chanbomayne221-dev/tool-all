@@ -32,6 +32,7 @@ RENT_CONTACT = "@huybuwin"
 RENT_MESSAGE = f"💼 Liên Hệ Admin Để Thuê: {RENT_CONTACT}"
 from modules import check as mod_check
 from modules import auto as mod_auto
+from modules import rai as mod_rai
 from modules import ref as mod_ref
 from modules import sex as mod_spam
 from modules import admins as mod_admins
@@ -91,8 +92,9 @@ def kb_main(uid: int | None = None):
     # Reply keyboard ở bàn phím — vuốt xuống là ẩn được
     rows = [
         ["🛡 CHECK JOIN", "🤖 AUTO"],
-        ["🎯 REF", "💬 SEX SPAM"],
-        ["🚪 JOIN GROUP", "👤 QUẢN LÝ ACC"],
+        ["📢 TOOL RẢI", "🎯 REF"],
+        ["💬 SEX SPAM", "🚪 JOIN GROUP"],
+        ["👤 QUẢN LÝ ACC"],
     ]
     # Chỉ Owner mới thấy ô QUẢN LÝ ADMIN
     if uid is not None and mod_admins.is_owner(uid):
@@ -113,6 +115,7 @@ def kb_main(uid: int | None = None):
 REPLY_TEXT_MAP = {
     "🛡 CHECK JOIN": "m:check",
     "🤖 AUTO":       "m:auto",
+    "📢 TOOL RẢI":   "m:rai",
     "🎯 REF":        "m:ref",
     "💬 SEX SPAM":   "m:spam",
     "🚪 JOIN GROUP": "m:join",
@@ -125,7 +128,7 @@ REPLY_TEXT_MAP = {
 }
 
 # Các step đang chờ user nhập NỘI DUNG TỰ DO (cho phép cả /command)
-FREEFORM_STEPS = {"spam.msg"}
+FREEFORM_STEPS = {"spam.msg", "rai.msg"}
 
 
 
@@ -365,6 +368,10 @@ async def dispatch_action(update, ctx, action: str):
         if not has_perm(uid, "AUTO"):
             await send(update, "❌ Không có quyền AUTO", kb_main(uid)); return
         await flow_auto_start(update, ctx); return
+    if action == "m:rai":
+        if not has_perm(uid, "RAI"):
+            await send(update, "❌ Không có quyền TOOL RẢI", kb_main(uid)); return
+        await flow_rai_start(update, ctx); return
     if action == "m:ref":
         if not has_perm(uid, "REF"):
             await send(update, "❌ Không có quyền REF", kb_main(uid)); return
@@ -444,6 +451,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not has_perm(uid, "AUTO"):
             await q.answer("❌ Không có quyền AUTO", show_alert=True); return
         await flow_auto_start(update, ctx); return
+    if data == "m:rai":
+        if not has_perm(uid, "RAI"):
+            await q.answer("❌ Không có quyền TOOL RẢI", show_alert=True); return
+        await flow_rai_start(update, ctx); return
     if data == "m:ref":
         if not has_perm(uid, "REF"):
             await q.answer("❌ Không có quyền REF", show_alert=True); return
@@ -477,6 +488,16 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.answer("❌ Không có quyền AUTO", show_alert=True); return
         await on_auto_pick(update, ctx); return
 
+    # RẢI handlers
+    if data == "rai:done":
+        if not has_perm(uid, "RAI"):
+            await q.answer("❌ Không có quyền TOOL RẢI", show_alert=True); return
+        await on_rai_done(update, ctx); return
+    if data.startswith("rai:pick:"):
+        if not has_perm(uid, "RAI"):
+            await q.answer("❌ Không có quyền TOOL RẢI", show_alert=True); return
+        await on_rai_pick(update, ctx); return
+
 
     # account ops
     if data == "acc:add":    await acc_add_start(update, ctx); return
@@ -504,6 +525,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await launch_check(update, ctx); return
         if s.step == "auto.confirm":
             await launch_auto(update, ctx); return
+        if s.step == "rai.confirm":
+            await launch_rai(update, ctx); return
         if s.step == "ref.confirm":
             await launch_ref(update, ctx); return
         if s.step == "spam.confirm":
@@ -714,6 +737,158 @@ async def launch_auto(update, ctx):
                 d.get("send_delay", AUTO_DEFAULT_SEND_DELAY),
                 d.get("del_delay", AUTO_DEFAULT_DELETE_DELAY),
                 AUTO_DEFAULT_TOTAL,
+                s.stop_event, logger)
+            s.status = "DONE"
+        except asyncio.CancelledError: s.status = "STOPPED"
+        except Exception as e:
+            s.status = "ERROR"; await logger(f"❌ {e}")
+        finally:
+            await finalize_log(ctx.application, update.effective_user.id)
+    s.task = asyncio.create_task(runner())
+
+
+# ─── flow: TOOL RẢI ─────────────────────────────────────
+RAI_MAX_GROUPS = 20
+
+
+def kb_rai_link():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ XONG NHẬP NHÓM", callback_data="rai:done")],
+        [InlineKeyboardButton("❌ HUỶ", callback_data="ctrl:cancel"),
+         InlineKeyboardButton("🏠 HOME", callback_data="m:home")],
+    ])
+
+
+def kb_rai_pick(uid: int):
+    sessions = list_sessions_for(uid)
+    rows = []
+    row = []
+    for name in sessions:
+        row.append(InlineKeyboardButton(f"👤 {name}",
+                                        callback_data=f"rai:pick:{name}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("❌ HUỶ", callback_data="ctrl:cancel"),
+                 InlineKeyboardButton("🏠 HOME", callback_data="m:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def flow_rai_start(update, ctx):
+    s = st(update.effective_user.id)
+    if not list_sessions_for(update.effective_user.id):
+        await send(update, banner("⚠ TOOL RẢI",
+            "Chưa có acc. Hãy thêm acc trước."), kb_back_home()); return
+    s.step = "rai.link"
+    s.data = {"groups": []}
+    await send(update, banner("📢 TOOL RẢI",
+        f"📌 Gửi link nhóm <b>thứ 1</b> (tối đa {RAI_MAX_GROUPS} nhóm).\n\n"
+        "Ví dụ: <code>https://t.me/xxxx</code> hoặc <code>@username</code>\n\n"
+        "➤ Nhập link nhóm:"), kb_cancel())
+
+
+async def step_rai(update, ctx, text: str):
+    s = st(update.effective_user.id); d = s.data
+    if s.step == "rai.link":
+        link = text.strip()
+        if not link:
+            await send(update, "❌ Link rỗng, gửi lại.", kb_cancel()); return
+        d.setdefault("groups", []).append(link)
+        n = len(d["groups"])
+        if n >= RAI_MAX_GROUPS:
+            await _rai_ask_msg(update, ctx); return
+        await send(update, banner("📢 TOOL RẢI",
+            f"✔ Đã lưu nhóm <b>{n}</b>: <code>{_html_escape(link)}</code>\n\n"
+            f"➤ Gửi link nhóm <b>thứ {n+1}</b> (tối đa {RAI_MAX_GROUPS}),\n"
+            "hoặc bấm <b>XONG NHẬP NHÓM</b> để tiếp tục."),
+            kb_rai_link())
+        return
+    if s.step == "rai.msg":
+        d["content"] = text
+        await _rai_ask_acc(update, ctx); return
+    if s.step == "rai.count":
+        try:
+            n = int(text.strip())
+            if n <= 0:
+                raise ValueError
+        except Exception:
+            await send(update, "❌ Số không hợp lệ, nhập lại số nguyên dương:",
+                kb_cancel()); return
+        d["per_group"] = n
+        await _rai_ask_confirm(update, ctx); return
+
+
+async def on_rai_done(update, ctx):
+    s = st(update.effective_user.id)
+    if s.step != "rai.link":
+        return
+    if not s.data.get("groups"):
+        await send(update, "❌ Chưa có nhóm nào, gửi link trước.", kb_cancel()); return
+    await _rai_ask_msg(update, ctx)
+
+
+async def _rai_ask_msg(update, ctx):
+    s = st(update.effective_user.id)
+    s.step = "rai.msg"
+    groups = s.data.get("groups", [])
+    lst = "\n".join(f"• <code>{_html_escape(g)}</code>" for g in groups)
+    await send(update, banner("📝 NỘI DUNG",
+        f"Đã có <b>{len(groups)}</b> nhóm:\n{lst}\n\n"
+        "➤ Gửi <b>nội dung</b> muốn rải (text, có thể bắt đầu bằng <code>/</code>):"),
+        kb_cancel())
+
+
+async def _rai_ask_acc(update, ctx):
+    s = st(update.effective_user.id)
+    s.step = "rai.pick"
+    await send(update, banner("👤 CHỌN ACC",
+        "Chọn <b>1 acc</b> để chạy RẢI (tối đa 1):"),
+        kb_rai_pick(update.effective_user.id))
+
+
+async def on_rai_pick(update, ctx):
+    q = update.callback_query
+    s = st(q.from_user.id)
+    if s.step != "rai.pick":
+        return
+    name = q.data.split(":", 2)[2]
+    s.data["session"] = name
+    s.step = "rai.count"
+    await send(update, banner("🔢 SỐ TIN / NHÓM",
+        f"Acc đã chọn: <b>{_html_escape(name)}</b>\n\n"
+        "➤ Mỗi nhóm gửi bao nhiêu tin? (nhập số nguyên dương):"),
+        kb_cancel())
+
+
+async def _rai_ask_confirm(update, ctx):
+    s = st(update.effective_user.id); d = s.data
+    s.step = "rai.confirm"
+    groups = d.get("groups", [])
+    lst = "\n".join(f"• <code>{_html_escape(g)}</code>" for g in groups)
+    preview = d.get("content", "")
+    if len(preview) > 200:
+        preview = preview[:200] + "…"
+    await send(update, banner("✅ XÁC NHẬN",
+        f"👤 Acc: <b>{_html_escape(d.get('session',''))}</b>\n"
+        f"📦 Số nhóm: <b>{len(groups)}</b>\n"
+        f"🔢 Mỗi nhóm: <b>{d.get('per_group')}</b> tin\n\n"
+        f"📝 Nội dung:\n<pre>{_html_escape(preview)}</pre>\n\n"
+        f"Danh sách nhóm:\n{lst}"),
+        kb_confirm())
+
+
+async def launch_rai(update, ctx):
+    s = st(update.effective_user.id); s.step = None
+    s.status = "RUNNING"; s.stop_event = asyncio.Event()
+    logger = await make_logger(ctx.application, update.effective_user.id,
+                               update.effective_chat.id)
+    d = s.data
+
+    async def runner():
+        try:
+            await mod_rai.run_rai(
+                d["session"], d["groups"], d["content"], d["per_group"],
                 s.stop_event, logger)
             s.status = "DONE"
         except asyncio.CancelledError: s.status = "STOPPED"
@@ -1070,6 +1245,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if s.step.startswith("check."):   await step_check(update, ctx, txt)
         elif s.step.startswith("auto."):  await step_auto(update, ctx, txt)
+        elif s.step.startswith("rai."):   await step_rai(update, ctx, txt)
         elif s.step.startswith("ref."):   await step_ref(update, ctx, txt)
         elif s.step.startswith("spam."):  await step_spam(update, ctx, txt)
         elif s.step.startswith("addacc."): await step_addacc(update, ctx, txt)
