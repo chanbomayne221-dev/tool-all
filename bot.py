@@ -514,8 +514,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await on_join_cb(update, ctx); return
     if data == "acc:import":
         s.step = "import.wait"
+        s.data["import_count"] = 0
         await send(update, banner("📥 IMPORT SESSION",
-            "Gửi file <code>.session</code> vào chat này."), kb_cancel())
+            "Gửi 1 hoặc nhiều file <code>.session</code> vào chat (có thể chọn nhiều file cùng lúc).\n"
+            "Bấm <b>Huỷ</b> khi xong."), kb_cancel())
         return
     if data == "acc:export": await acc_export(update, ctx); return
 
@@ -1199,10 +1201,15 @@ async def on_document(update: Update, ctx):
     await f.download_to_drive(dest)
     sess_name = doc.file_name[:-len(".session")]
     mod_admins.set_session_owner(sess_name, uid)
-    s.step = None
+    count = int(s.data.get("import_count", 0)) + 1
+    s.data["import_count"] = count
+    # giữ nguyên s.step = "import.wait" để nhận thêm file tiếp theo
     await update.message.reply_text(
-        banner("📥 IMPORT SESSION", f"✅ Đã thêm <code>{doc.file_name}</code>"),
-        reply_markup=kb_acc(), parse_mode=ParseMode.HTML)
+        banner("📥 IMPORT SESSION",
+               f"✅ Đã thêm <code>{doc.file_name}</code>\n"
+               f"📦 Tổng đã import: <b>{count}</b>\n"
+               f"Tiếp tục gửi file khác hoặc bấm <b>Huỷ</b> để kết thúc."),
+        reply_markup=kb_cancel(), parse_mode=ParseMode.HTML)
 
 
 # ─── text router ────────────────────────────────────────
