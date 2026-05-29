@@ -20,6 +20,7 @@ VN_TZ = timezone(timedelta(hours=7))
 PERMS = [
     ("CHECK",      "🛡 CHECK JOIN"),
     ("AUTO",       "🤖 AUTO"),
+    ("RAI",        "📢 TOOL RẢI"),
     ("REF",        "🎯 REF"),
     ("SPAM",       "💬 SEX SPAM"),
     ("JOIN",       "🚪 JOIN GROUP"),
