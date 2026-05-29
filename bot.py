@@ -12,6 +12,7 @@ from typing import Optional
 
 from telegram import (
     InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -79,18 +80,32 @@ def has_perm(uid: int, perm: str) -> bool:
 
 # ─── keyboards ──────────────────────────────────────────
 def kb_main():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛡 CHECK JOIN", callback_data="m:check"),
-         InlineKeyboardButton("🤖 AUTO",      callback_data="m:auto")],
-        [InlineKeyboardButton("🎯 REF",        callback_data="m:ref"),
-         InlineKeyboardButton("💬 SEX SPAM",   callback_data="m:spam")],
-        [InlineKeyboardButton("🚪 JOIN GROUP", callback_data="m:join"),
-         InlineKeyboardButton("👤 QUẢN LÝ ACC", callback_data="m:acc")],
-        [InlineKeyboardButton("🛠 QUẢN LÝ ADMIN", callback_data="m:admins")],
-        [InlineKeyboardButton("📜 LOGS",   callback_data="m:logs"),
-         InlineKeyboardButton("📊 STATUS", callback_data="m:status")],
-        [InlineKeyboardButton("⛔ STOP TASK", callback_data="m:stop")],
-    ])
+    # Reply keyboard (gắn dưới bàn phím chat)
+    return ReplyKeyboardMarkup([
+        ["🛡 CHECK JOIN", "🤖 AUTO"],
+        ["🎯 REF", "💬 SEX SPAM"],
+        ["🚪 JOIN GROUP", "👤 QUẢN LÝ ACC"],
+        ["🛠 QUẢN LÝ ADMIN"],
+        ["📜 LOGS", "📊 STATUS"],
+        ["⛔ STOP TASK", "🏠 HOME"],
+    ], resize_keyboard=True, is_persistent=True)
+
+
+# Map text bàn phím -> callback action
+REPLY_TEXT_MAP = {
+    "🛡 CHECK JOIN": "m:check",
+    "🤖 AUTO":       "m:auto",
+    "🎯 REF":        "m:ref",
+    "💬 SEX SPAM":   "m:spam",
+    "🚪 JOIN GROUP": "m:join",
+    "👤 QUẢN LÝ ACC": "m:acc",
+    "🛠 QUẢN LÝ ADMIN": "m:admins",
+    "📜 LOGS":   "m:logs",
+    "📊 STATUS": "m:status",
+    "⛔ STOP TASK": "m:stop",
+    "🏠 HOME": "m:home",
+}
+
 
 
 def kb_acc():
@@ -225,7 +240,60 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await show_home(update)
 
 
+# ─── dispatch (dùng chung cho callback + reply keyboard) ─
+async def dispatch_action(update, ctx, action: str):
+    uid = update.effective_user.id
+    s = st(uid)
+    if action == "m:home":
+        s.step = None; s.data.clear()
+        await show_home(update); return
+    if action == "m:stop":
+        if not has_perm(uid, "STOP"):
+            await send(update, "❌ Không có quyền STOP", kb_main()); return
+        await handle_stop(update, ctx); return
+    if action == "m:status":
+        if not has_perm(uid, "LOGS"):
+            await send(update, "❌ Không có quyền", kb_main()); return
+        await send(update, banner("📊 STATUS",
+            f"Trạng thái: <b>{s.status}</b>\n"
+            f"Step hiện tại: <code>{s.step or '-'}</code>\n"
+            f"Sessions: <b>{len(list_sessions())}</b>"), kb_back_home()); return
+    if action == "m:logs":
+        if not has_perm(uid, "LOGS"):
+            await send(update, "❌ Không có quyền", kb_main()); return
+        await send(update, _format_log(s), kb_back_home()); return
+    if action == "m:check":
+        if not has_perm(uid, "CHECK"):
+            await send(update, "❌ Không có quyền CHECK", kb_main()); return
+        await flow_check_start(update, ctx); return
+    if action == "m:auto":
+        if not has_perm(uid, "AUTO"):
+            await send(update, "❌ Không có quyền AUTO", kb_main()); return
+        await flow_auto_start(update, ctx); return
+    if action == "m:ref":
+        if not has_perm(uid, "REF"):
+            await send(update, "❌ Không có quyền REF", kb_main()); return
+        await flow_ref_start(update, ctx); return
+    if action == "m:spam":
+        if not has_perm(uid, "SPAM"):
+            await send(update, "❌ Không có quyền SPAM", kb_main()); return
+        await flow_spam_start(update, ctx); return
+    if action == "m:join":
+        if not has_perm(uid, "JOIN"):
+            await send(update, "❌ Không có quyền JOIN", kb_main()); return
+        await flow_join_start(update, ctx); return
+    if action == "m:admins":
+        await admins_home(update, ctx); return
+    if action == "m:acc":
+        if not has_perm(uid, "MANAGE_ACC"):
+            await send(update, "❌ Không có quyền Quản lý TK", kb_main()); return
+        await send(update, banner("👤 QUẢN LÝ ACC",
+            f"Sessions hiện có: <b>{len(list_sessions())}</b>"), kb_acc())
+        return
+
+
 # ─── menu callback ──────────────────────────────────────
+
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
@@ -297,6 +365,13 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send(update, banner("👤 QUẢN LÝ ACC",
             f"Sessions hiện có: <b>{len(list_sessions())}</b>"), kb_acc())
         return
+
+    # AUTO pick acc
+    if data.startswith("auto:pick:"):
+        if not has_perm(uid, "AUTO"):
+            await q.answer("❌ Không có quyền AUTO", show_alert=True); return
+        await on_auto_pick(update, ctx); return
+
 
     # account ops
     if data == "acc:add":    await acc_add_start(update, ctx); return
@@ -432,59 +507,91 @@ async def launch_check(update, ctx):
 
 
 # ─── flow: AUTO ─────────────────────────────────────────
+# Mặc định: chạy đến khi STOP, không hỏi delay/số tin
+AUTO_DEFAULT_SEND_DELAY = 5.0       # giây giữa mỗi tin
+AUTO_DEFAULT_DELETE_DELAY = 8.0     # giây trước khi xoá tin
+AUTO_DEFAULT_TOTAL = 10**9          # chạy "vô hạn" cho đến khi STOP
+
+
+def kb_auto_pick():
+    sessions = list_sessions()
+    rows = [[InlineKeyboardButton(f"🚀 TẤT CẢ ({len(sessions)} acc)",
+                                  callback_data="auto:pick:__ALL__")]]
+    row = []
+    for i, name in enumerate(sessions, 1):
+        row.append(InlineKeyboardButton(f"👤 {name}",
+                                        callback_data=f"auto:pick:{name}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("❌ HUỶ", callback_data="ctrl:cancel"),
+                 InlineKeyboardButton("🏠 HOME", callback_data="m:home")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def flow_auto_start(update, ctx):
     s = st(update.effective_user.id)
-    if not list_sessions():
+    sessions = list_sessions()
+    if not sessions:
         await send(update, banner("⚠ AUTO",
             "Chưa có acc. Hãy thêm acc trước."), kb_back_home()); return
-    s.step = "auto.numacc"; s.data = {}
+    s.step = "auto.pick"; s.data = {}
     await send(update, banner("🤖 AUTO",
-        f"📌 Số acc muốn dùng (tối đa <b>{len(list_sessions())}</b>)\n\n"
-        "➤ Nhập số acc:"), kb_cancel())
+        f"📌 Chọn acc muốn dùng (tổng <b>{len(sessions)}</b>)\n\n"
+        "• Bấm <b>TẤT CẢ</b> để dùng toàn bộ acc\n"
+        "• Hoặc bấm 1 acc cụ thể"), kb_auto_pick())
+
+
+async def on_auto_pick(update, ctx):
+    q = update.callback_query
+    s = st(q.from_user.id)
+    name = q.data.split(":", 2)[2]
+    if name == "__ALL__":
+        s.data["sessions"] = list_sessions()
+        label = f"TẤT CẢ ({len(s.data['sessions'])} acc)"
+    else:
+        s.data["sessions"] = [name]
+        label = name
+    s.step = "auto.link"
+    await send(update, banner("🔗 LINK / USERNAME",
+        f"Đã chọn: <b>{_html_escape(label)}</b>\n\n"
+        "Gửi link nhóm / @username / số điện thoại.\n"
+        "Ví dụ: <code>https://t.me/xxxx</code>\n\n"
+        "➤ Nhập link:"),
+        kb_cancel())
 
 
 async def step_auto(update, ctx, text: str):
     s = st(update.effective_user.id); d = s.data
-    if s.step == "auto.numacc":
-        try: d["numacc"] = max(1, min(int(text), len(list_sessions())))
-        except: await update.message.reply_text("❌ Sai. Nhập lại:"); return
-        s.step = "auto.link"
-        await update.message.reply_text(banner("🔗 LINK / USERNAME",
-            "Nhập link nhóm hoặc @username hoặc số điện thoại\n\n"
-            "Ví dụ: <code>https://t.me/xxxx</code>\n\n➤ Nhập:"),
-            reply_markup=kb_cancel(), parse_mode=ParseMode.HTML)
-    elif s.step == "auto.link":
-        d["link"] = text.strip(); s.step = "auto.delay"
-        await update.message.reply_text(banner("⏱ DELAY GỬI",
-            "Thời gian nghỉ giữa mỗi tin (giây)\n\n"
-            "Ví dụ:\n<code>1</code> nhanh\n<code>3</code> trung bình\n"
-            "<code>5</code> an toàn\n\n➤ Nhập delay:"),
-            reply_markup=kb_cancel(), parse_mode=ParseMode.HTML)
-    elif s.step == "auto.delay":
-        try: d["delay"] = float(text)
-        except: await update.message.reply_text("❌ Sai. Nhập lại:"); return
-        s.step = "auto.deldelay"
-        await update.message.reply_text(banner("🗑 DELAY XOÁ",
-            "Sau bao nhiêu giây sẽ xoá tin vừa gửi\n\n➤ Nhập:"),
-            reply_markup=kb_cancel(), parse_mode=ParseMode.HTML)
-    elif s.step == "auto.deldelay":
-        try: d["deldelay"] = float(text)
-        except: await update.message.reply_text("❌ Sai. Nhập lại:"); return
-        s.step = "auto.total"
-        await update.message.reply_text(banner("🔁 SỐ LẦN",
-            "Số tin tối đa mỗi acc sẽ gửi\n\n➤ Nhập:"),
-            reply_markup=kb_cancel(), parse_mode=ParseMode.HTML)
-    elif s.step == "auto.total":
-        try: d["total"] = int(text)
-        except: await update.message.reply_text("❌ Sai. Nhập lại:"); return
-        s.step = "auto.confirm"
-        await update.message.reply_text(banner("✅ XÁC NHẬN AUTO",
-            f"👥 Acc      : <b>{d['numacc']}</b>\n"
-            f"🔗 Target   : <code>{_html_escape(d['link'])}</code>\n"
-            f"⏱ Delay gửi: <b>{d['delay']}s</b>\n"
-            f"🗑 Delay xoá: <b>{d['deldelay']}s</b>\n"
-            f"🔁 Số tin  : <b>{d['total']}</b>"),
-            reply_markup=kb_confirm(), parse_mode=ParseMode.HTML)
+    if s.step == "auto.link":
+        d["link"] = text.strip()
+        s.step = "auto.send_delay"
+        await send(update, banner("⏱ DELAY GỬI",
+            f"Mặc định: <b>{AUTO_DEFAULT_SEND_DELAY}s</b>\n\n"
+            "➤ Nhập số giây giữa mỗi lần gửi (hoặc gửi <b>0</b> để dùng mặc định):"),
+            kb_cancel())
+        return
+    if s.step == "auto.send_delay":
+        try:
+            v = float(text.strip().replace(",", "."))
+            d["send_delay"] = v if v > 0 else AUTO_DEFAULT_SEND_DELAY
+        except Exception:
+            d["send_delay"] = AUTO_DEFAULT_SEND_DELAY
+        s.step = "auto.del_delay"
+        await send(update, banner("🗑 THỜI GIAN XOÁ",
+            f"Mặc định: <b>{AUTO_DEFAULT_DELETE_DELAY}s</b>\n\n"
+            "➤ Nhập số giây sau khi gửi sẽ xoá tin (hoặc gửi <b>0</b> để dùng mặc định):"),
+            kb_cancel())
+        return
+    if s.step == "auto.del_delay":
+        try:
+            v = float(text.strip().replace(",", "."))
+            d["del_delay"] = v if v > 0 else AUTO_DEFAULT_DELETE_DELAY
+        except Exception:
+            d["del_delay"] = AUTO_DEFAULT_DELETE_DELAY
+        await launch_auto(update, ctx)
+        return
 
 
 async def launch_auto(update, ctx):
@@ -493,12 +600,16 @@ async def launch_auto(update, ctx):
     logger = await make_logger(ctx.application, update.effective_user.id,
                                update.effective_chat.id)
     d = s.data
-    sessions = list_sessions()[:d["numacc"]]
+    sessions = d.get("sessions") or list_sessions()
 
     async def runner():
         try:
-            await mod_auto.run_auto(sessions, d["link"], d["delay"],
-                                    d["deldelay"], d["total"], s.stop_event, logger)
+            await mod_auto.run_auto(
+                sessions, d["link"],
+                d.get("send_delay", AUTO_DEFAULT_SEND_DELAY),
+                d.get("del_delay", AUTO_DEFAULT_DELETE_DELAY),
+                AUTO_DEFAULT_TOTAL,
+                s.stop_event, logger)
             s.status = "DONE"
         except asyncio.CancelledError: s.status = "STOPPED"
         except Exception as e:
@@ -506,6 +617,7 @@ async def launch_auto(update, ctx):
         finally:
             await finalize_log(ctx.application, update.effective_user.id)
     s.task = asyncio.create_task(runner())
+
 
 
 # ─── flow: REF ──────────────────────────────────────────
@@ -809,10 +921,21 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(uid):
         return
     s = st(uid)
+    txt = (update.message.text or "").strip()
+
+    # Bàn phím chính – ưu tiên cao nhất, huỷ step hiện tại
+    if txt in REPLY_TEXT_MAP:
+        action = REPLY_TEXT_MAP[txt]
+        s.step = None
+        s.data.clear()
+        await dispatch_action(update, ctx, action)
+        return
+
     if not s.step:
         await update.message.reply_text("Dùng menu bên dưới 👇",
                                         reply_markup=kb_main())
         return
+
     txt = update.message.text or ""
     try:
         if s.step.startswith("check."):   await step_check(update, ctx, txt)
