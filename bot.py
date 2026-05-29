@@ -80,19 +80,20 @@ def has_perm(uid: int, perm: str) -> bool:
 
 # ─── keyboards ──────────────────────────────────────────
 def kb_main():
-    # Inline keyboard – gắn ngay trong tin nhắn menu (giống bot bình thường)
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛡 CHECK JOIN", callback_data="m:check"),
-         InlineKeyboardButton("🤖 AUTO",       callback_data="m:auto")],
-        [InlineKeyboardButton("🎯 REF",        callback_data="m:ref"),
-         InlineKeyboardButton("💬 SEX SPAM",   callback_data="m:spam")],
-        [InlineKeyboardButton("🚪 JOIN GROUP", callback_data="m:join"),
-         InlineKeyboardButton("👤 QUẢN LÝ ACC", callback_data="m:acc")],
-        [InlineKeyboardButton("🛠 QUẢN LÝ ADMIN", callback_data="m:admins")],
-        [InlineKeyboardButton("📜 LOGS",   callback_data="m:logs"),
-         InlineKeyboardButton("📊 STATUS", callback_data="m:status")],
-        [InlineKeyboardButton("⛔ STOP TASK", callback_data="m:stop")],
-    ])
+    # Reply keyboard ở bàn phím — vuốt xuống là ẩn được (không persistent)
+    return ReplyKeyboardMarkup(
+        [
+            ["🛡 CHECK JOIN", "🤖 AUTO"],
+            ["🎯 REF", "💬 SEX SPAM"],
+            ["🚪 JOIN GROUP", "👤 QUẢN LÝ ACC"],
+            ["🛠 QUẢN LÝ ADMIN"],
+            ["📜 LOGS", "📊 STATUS"],
+            ["⛔ STOP TASK"],
+        ],
+        resize_keyboard=True,
+        is_persistent=False,
+        input_field_placeholder="Chọn chức năng hoặc nhập lệnh…",
+    )
 
 
 # Giữ map cũ để tương thích (nếu user vẫn còn reply keyboard cũ)
@@ -168,24 +169,16 @@ def banner(title: str, body: str) -> str:
 async def show_home(update: Update):
     text = banner(
         "🧰 FULL TOOL — MENU",
-        "Chọn chức năng bên dưới.\n"
-        "Mỗi bước sẽ được hỏi tuần tự giống tool Termux.\n\n"
+        "Chọn chức năng ở bàn phím bên dưới.\n"
+        "Vuốt bàn phím xuống là ẩn được như bot bình thường.\n\n"
         f"👮 Admin: <code>{', '.join(map(str, ADMIN_IDS))}</code>"
     )
-    # Nếu là callback (bấm nút) -> edit message hiện tại
+    # Callback (bấm nút inline) -> trả về tin nhắn mới kèm reply keyboard
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(
-                text, reply_markup=kb_main(), parse_mode=ParseMode.HTML)
-            return
+            await update.callback_query.answer()
         except Exception:
             pass
-    # Nếu là /start hoặc tin nhắn -> gỡ reply keyboard cũ rồi gửi menu inline
-    try:
-        await update.effective_chat.send_message(
-            "…", reply_markup=ReplyKeyboardRemove())
-    except Exception:
-        pass
     await update.effective_chat.send_message(
         text, reply_markup=kb_main(), parse_mode=ParseMode.HTML)
 
