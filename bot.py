@@ -835,7 +835,7 @@ async def _rai_ask_msg(update, ctx):
     lst = "\n".join(f"• <code>{_html_escape(g)}</code>" for g in groups)
     await send(update, banner("📝 NỘI DUNG",
         f"Đã có <b>{len(groups)}</b> nhóm:\n{lst}\n\n"
-        "➤ Gửi <b>nội dung</b> muốn rải (text, có thể bắt đầu bằng <code>/</code>):"),
+        "➤ Gửi <b>nội dung</b> muốn rải<code>/</code>):"),
         kb_cancel())
 
 
@@ -1219,6 +1219,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             if s.step.startswith("spam."):
                 await step_spam(update, ctx, txt)
+            elif s.step.startswith("rai."):
+                await step_rai(update, ctx, txt)
         except Exception as e:
             log.exception("freeform step error")
             await update.message.reply_text(f"❌ Lỗi: {e}")
