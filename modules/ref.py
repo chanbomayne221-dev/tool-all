@@ -114,6 +114,37 @@ async def _ref_one(session_name, deep_link, log):
             if not clicked:
                 await log(f"[{session_name}] ❌ Không thấy nút xác minh")
             else:
+                # Chờ bot trong từng nhóm trả lời tin nhắn
+                for g in joined:
+                    try:
+                        ent = await client.get_entity(g)
+                        baseline = await client.get_messages(ent, limit=1)
+                        base_id = baseline[0].id if baseline else 0
+                        got = False
+                        # Poll tối đa 120s chờ tin mới từ bot trong nhóm
+                        for _ in range(24):
+                            await asyncio.sleep(5)
+                            new_msgs = await client.get_messages(ent, limit=5)
+                            for nm in new_msgs:
+                                if nm.id > base_id:
+                                    try:
+                                        sender = await nm.get_sender()
+                                    except Exception:
+                                        sender = None
+                                    if sender and getattr(sender, "bot", False):
+                                        got = True
+                                        break
+                            if got:
+                                break
+                        if got:
+                            await log(f"[{session_name}] 💬 Bot đã rep ở {g}")
+                        else:
+                            await log(f"[{session_name}] ⏳ Không thấy bot rep ở {g}")
+                    except Exception:
+                        pass
+                # Sau 10 phút mới rời tất cả nhóm
+                await log(f"[{session_name}] ⏰ Chờ 10 phút rồi rời nhóm...")
+                await asyncio.sleep(600)
                 for g in joined:
                     try:
                         ent = await client.get_entity(g)
