@@ -125,7 +125,7 @@ async def run_duyet(session_name, bot_username, delay, trigger, button_text,
 
         # Chạy tới khi stop hoặc client disconnect
         stop_task = asyncio.create_task(stop_event.wait())
-        disc_task = asyncio.create_task(client.disconnected)
+        disc_task = asyncio.ensure_future(client.disconnected)
         await asyncio.wait(
             {stop_task, disc_task}, return_when=asyncio.FIRST_COMPLETED
         )
