@@ -38,6 +38,7 @@ from modules import sex as mod_spam
 from modules import admins as mod_admins
 from modules import join as mod_join
 from modules import messages as mod_msg
+from modules import duyet as mod_duyet
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -94,6 +95,7 @@ def kb_main(uid: int | None = None):
         ["🛡 CHECK JOIN", "🤖 AUTO"],
         ["📢 TOOL RẢI", "🎯 REF"],
         ["💬 SEX SPAM", "🚪 JOIN GROUP"],
+        ["✅ DUYỆT NẠP"],
         ["👤 QUẢN LÝ ACC"],
     ]
     # Chỉ Owner mới thấy ô QUẢN LÝ ADMIN
@@ -119,6 +121,7 @@ REPLY_TEXT_MAP = {
     "🎯 REF":        "m:ref",
     "💬 SEX SPAM":   "m:spam",
     "🚪 JOIN GROUP": "m:join",
+    "✅ DUYỆT NẠP":  "m:duyet",
     "👤 QUẢN LÝ ACC": "m:acc",
     "🛠 QUẢN LÝ ADMIN": "m:admins",
     "📜 LOGS":   "m:logs",
@@ -384,6 +387,10 @@ async def dispatch_action(update, ctx, action: str):
         if not has_perm(uid, "JOIN"):
             await send(update, "❌ Không có quyền JOIN", kb_main(uid)); return
         await flow_join_start(update, ctx); return
+    if action == "m:duyet":
+        if not has_perm(uid, "DUYET"):
+            await send(update, "❌ Không có quyền DUYỆT NẠP", kb_main(uid)); return
+        await flow_duyet_start(update, ctx); return
     if action == "m:admins":
         if not mod_admins.is_owner(uid):
             await send(update, "❌ Chỉ Owner mới được quản lý admin", kb_main(uid)); return
@@ -467,6 +474,14 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not has_perm(uid, "JOIN"):
             await q.answer("❌ Không có quyền JOIN", show_alert=True); return
         await flow_join_start(update, ctx); return
+    if data == "m:duyet":
+        if not has_perm(uid, "DUYET"):
+            await q.answer("❌ Không có quyền DUYỆT NẠP", show_alert=True); return
+        await flow_duyet_start(update, ctx); return
+    if data.startswith("duyet:pick:"):
+        if not has_perm(uid, "DUYET"):
+            await q.answer("❌ Không có quyền DUYỆT NẠP", show_alert=True); return
+        await on_duyet_pick(update, ctx); return
     if data == "m:admins":
         if not mod_admins.is_owner(uid):
             await q.answer("❌ Chỉ Owner", show_alert=True); return
@@ -514,10 +529,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await on_join_cb(update, ctx); return
     if data == "acc:import":
         s.step = "import.wait"
-        s.data["import_count"] = 0
         await send(update, banner("📥 IMPORT SESSION",
-            "Gửi 1 hoặc nhiều file <code>.session</code> vào chat (có thể chọn nhiều file cùng lúc).\n"
-            "Bấm <b>Huỷ</b> khi xong."), kb_cancel())
+            "Gửi file <code>.session</code> vào chat này."), kb_cancel())
         return
     if data == "acc:export": await acc_export(update, ctx); return
 
@@ -535,6 +548,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await launch_spam(update, ctx); return
         if s.step == "join.confirm":
             await launch_join(update, ctx); return
+        if s.step == "duyet.confirm":
+            await launch_duyet(update, ctx); return
         if s.step and s.step.startswith("acc.del.confirm:"):
             name = s.step.split(":", 1)[1]
             delete_session(name)
@@ -1201,15 +1216,10 @@ async def on_document(update: Update, ctx):
     await f.download_to_drive(dest)
     sess_name = doc.file_name[:-len(".session")]
     mod_admins.set_session_owner(sess_name, uid)
-    count = int(s.data.get("import_count", 0)) + 1
-    s.data["import_count"] = count
-    # giữ nguyên s.step = "import.wait" để nhận thêm file tiếp theo
+    s.step = None
     await update.message.reply_text(
-        banner("📥 IMPORT SESSION",
-               f"✅ Đã thêm <code>{doc.file_name}</code>\n"
-               f"📦 Tổng đã import: <b>{count}</b>\n"
-               f"Tiếp tục gửi file khác hoặc bấm <b>Huỷ</b> để kết thúc."),
-        reply_markup=kb_cancel(), parse_mode=ParseMode.HTML)
+        banner("📥 IMPORT SESSION", f"✅ Đã thêm <code>{doc.file_name}</code>"),
+        reply_markup=kb_acc(), parse_mode=ParseMode.HTML)
 
 
 # ─── text router ────────────────────────────────────────
@@ -1259,6 +1269,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif s.step.startswith("spam."):  await step_spam(update, ctx, txt)
         elif s.step.startswith("addacc."): await step_addacc(update, ctx, txt)
         elif s.step.startswith("join."):  await step_join(update, ctx, txt)
+        elif s.step.startswith("duyet."): await step_duyet(update, ctx, txt)
         elif s.step.startswith("admadd."): await step_adm_add(update, ctx, txt)
         elif s.step.startswith("admexp."): await step_adm_exp(update, ctx, txt)
         elif s.step.startswith("admdel."): await step_adm_del(update, ctx, txt)
@@ -1671,6 +1682,121 @@ async def launch_join(update, ctx):
             await mod_join.run_join(targets, d["link"], d["leave_after"], logger)
             s.status = "DONE"
         except asyncio.CancelledError: s.status = "STOPPED"
+        except Exception as e:
+            s.status = "ERROR"; await logger(f"❌ {e}")
+        finally:
+            await finalize_log(ctx.application, uid)
+    s.task = asyncio.create_task(runner())
+
+
+# ════════════════════════════════════════════════════════
+# DUYỆT NẠP FLOW
+# ════════════════════════════════════════════════════════
+DUYET_DEFAULT_DELAY = 10.0
+DUYET_DEFAULT_TRIGGER = "YÊU CẦU NẠP TIỀN"
+DUYET_DEFAULT_BUTTON = "Duyệt"
+
+
+def kb_duyet_pick(uid: int):
+    sessions = list_sessions_for(uid)
+    rows = []
+    row = []
+    for name in sessions:
+        row.append(InlineKeyboardButton(f"👤 {name}",
+                                        callback_data=f"duyet:pick:{name}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("❌ HUỶ", callback_data="ctrl:cancel"),
+                 InlineKeyboardButton("🏠 HOME", callback_data="m:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def flow_duyet_start(update, ctx):
+    uid = update.effective_user.id
+    s = st(uid)
+    sessions = list_sessions_for(uid)
+    if not sessions:
+        await send(update, banner("⚠ DUYỆT NẠP",
+            "Chưa có acc nào. Vào QUẢN LÝ ACC để thêm trước."),
+            kb_back_home()); return
+    s.step = "duyet.pick"; s.data = {}
+    await send(update, banner("✅ DUYỆT NẠP",
+        "📌 Chọn <b>1 acc</b> để chạy auto duyệt:\n\n"
+        f"(Tổng acc của bạn: <b>{len(sessions)}</b>)"),
+        kb_duyet_pick(uid))
+
+
+async def on_duyet_pick(update, ctx):
+    q = update.callback_query
+    uid = q.from_user.id
+    s = st(uid)
+    if s.step != "duyet.pick":
+        return
+    name = q.data.split(":", 2)[2]
+    s.data["session"] = name
+    s.step = "duyet.bot"
+    await send(update, banner("🤖 USERNAME BOT NẠP",
+        f"Acc đã chọn: <b>{_html_escape(name)}</b>\n\n"
+        "➤ Gửi <b>username của bot</b> sẽ gửi lệnh nạp\n"
+        "Ví dụ: <code>SIC88_BOT</code> hoặc <code>@SIC88_BOT</code>"),
+        kb_cancel())
+
+
+async def step_duyet(update, ctx, text: str):
+    uid = update.effective_user.id
+    s = st(uid); d = s.data
+    if s.step == "duyet.bot":
+        bot = text.strip().lstrip("@")
+        if not bot:
+            await update.message.reply_text("❌ Username rỗng, gửi lại:")
+            return
+        d["bot"] = bot
+        s.step = "duyet.delay"
+        await send(update, banner("⏱ THỜI GIAN CHỜ",
+            f"Bot: <b>@{_html_escape(bot)}</b>\n\n"
+            f"➤ Nhập số giây chờ trước khi bấm <b>Duyệt</b>\n"
+            f"(Mặc định: <b>{DUYET_DEFAULT_DELAY}</b>s. Gửi <code>0</code> để dùng mặc định)"),
+            kb_cancel())
+        return
+    if s.step == "duyet.delay":
+        try:
+            v = float(text.strip().replace(",", "."))
+            d["delay"] = v if v > 0 else DUYET_DEFAULT_DELAY
+        except Exception:
+            d["delay"] = DUYET_DEFAULT_DELAY
+        d.setdefault("trigger", DUYET_DEFAULT_TRIGGER)
+        d.setdefault("button", DUYET_DEFAULT_BUTTON)
+        s.step = "duyet.confirm"
+        await send(update, banner("✅ XÁC NHẬN DUYỆT NẠP",
+            f"👤 Acc      : <b>{_html_escape(d['session'])}</b>\n"
+            f"🤖 Bot      : <b>@{_html_escape(d['bot'])}</b>\n"
+            f"⏱ Chờ      : <b>{d['delay']}s</b>\n"
+            f"🔎 Trigger  : <code>{_html_escape(d['trigger'])}</code>\n"
+            f"🔘 Nút bấm  : <code>{_html_escape(d['button'])}</code>\n\n"
+            "Tool sẽ chạy liên tục đến khi bấm ⛔ STOP TASK.\n\n"
+            "Bấm <b>XÁC NHẬN</b> để bắt đầu."),
+            kb_confirm())
+
+
+async def launch_duyet(update, ctx):
+    uid = update.effective_user.id
+    s = st(uid); s.step = None
+    s.status = "RUNNING"; s.stop_event = asyncio.Event()
+    logger = await make_logger(ctx.application, uid, update.effective_chat.id)
+    d = s.data
+
+    async def runner():
+        try:
+            await mod_duyet.run_duyet(
+                d["session"], d["bot"], d["delay"],
+                d.get("trigger", DUYET_DEFAULT_TRIGGER),
+                d.get("button", DUYET_DEFAULT_BUTTON),
+                s.stop_event, logger)
+            s.status = "DONE"
+        except asyncio.CancelledError:
+            s.status = "STOPPED"
         except Exception as e:
             s.status = "ERROR"; await logger(f"❌ {e}")
         finally:
