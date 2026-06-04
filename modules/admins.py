@@ -24,6 +24,7 @@ PERMS = [
     ("REF",        "🎯 REF"),
     ("SPAM",       "💬 SEX SPAM"),
     ("JOIN",       "🚪 JOIN GROUP"),
+    ("DUYET",      "✅ DUYỆT NẠP"),
     ("MANAGE_ACC", "👤 Quản lý TK"),
     ("READ_MSG",   "📩 Đọc tin nhắn TK"),
     ("STOP",       "⛔ Stop task"),
