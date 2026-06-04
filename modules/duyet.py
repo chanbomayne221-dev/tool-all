@@ -2,19 +2,28 @@
 
 Cách hoạt động:
 - Mở session telethon đã chọn.
-- Lắng nghe NewMessage + MessageEdited từ đúng bot_username.
-- Khi text chứa trigger (mặc định "YÊU CẦU NẠP TIỀN") -> chờ `delay` giây,
-  refetch message, tìm inline button có chữ "Duyệt" và bấm.
-- Chạy tới khi stop_event được set.
+- Lắng nghe NewMessage + MessageEdited.
+- Chỉ xử lý tin có timestamp >= thời điểm BẬT TOOL (không quét tin cũ).
+- Khi text chứa trigger -> chờ `delay` giây, refetch message,
+  tìm inline button có chữ "Duyệt" và bấm.
+- Chạy liên tục cho đến khi stop_event được set (bấm STOP).
 """
 import asyncio
+import time
+from datetime import datetime, timezone
+
 from telethon import events
 from telethon.errors import FloodWaitError
+
 from .session_mgr import make_client
 
 
 async def _click_duyet(client, msg, button_text, log, tag):
-    fresh = await client.get_messages(msg.chat_id, ids=msg.id)
+    try:
+        fresh = await client.get_messages(msg.chat_id, ids=msg.id)
+    except Exception as e:
+        await log(f"[{tag}] ❌ Lỗi refetch msg_id={msg.id}: {e}")
+        return
     if fresh is None:
         await log(f"[{tag}] ⚠ Tin đã bị xoá, bỏ qua msg_id={msg.id}")
         return
@@ -42,13 +51,16 @@ async def run_duyet(session_name, bot_username, delay, trigger, button_text,
     tag = session_name
     client = make_client(session_name)
     pending: set[asyncio.Task] = set()
+    handled_ids: set[int] = set()  # dedupe NewMessage + MessageEdited
+    # Thời điểm bật tool – chỉ xử lý tin từ lúc này trở đi
+    start_ts = datetime.now(timezone.utc)
+
     try:
         await client.connect()
         if not await client.is_user_authorized():
             await log(f"[{tag}] ❌ Session die")
             return
 
-        # Resolve bot entity 1 lần
         bot_uname = bot_username.lstrip("@")
         try:
             bot_entity = await client.get_entity(bot_uname)
@@ -58,39 +70,63 @@ async def run_duyet(session_name, bot_username, delay, trigger, button_text,
             return
 
         await log(f"[{tag}] 🚀 DUYỆT NẠP đang chạy")
-        await log(f"[{tag}] 👀 Bot: @{bot_uname} | trigger='{trigger}' | "
-                  f"delay={delay}s | button='{button_text}'")
+        await log(f"[{tag}] 👀 Bot: @{bot_uname} (id={bot_id}) | "
+                  f"trigger='{trigger}' | delay={delay}s | button='{button_text}'")
+        await log(f"[{tag}] ⏱ Chỉ duyệt tin nhận từ {start_ts.strftime('%H:%M:%S')} UTC trở đi")
 
         async def schedule(msg):
             await log(f"[{tag}] ⏳ Phát hiện lệnh nạp (msg_id={msg.id}), "
                       f"chờ {delay}s rồi bấm Duyệt…")
             try:
-                await asyncio.sleep(delay)
-                if stop_event.is_set():
-                    return
+                # chờ theo từng giây để stop ngay khi user bấm STOP
+                slept = 0.0
+                step = 0.5
+                while slept < delay:
+                    if stop_event.is_set():
+                        return
+                    await asyncio.sleep(min(step, delay - slept))
+                    slept += step
                 await _click_duyet(client, msg, button_text, log, tag)
             except asyncio.CancelledError:
                 pass
             except Exception as e:
                 await log(f"[{tag}] ❌ {e}")
 
-        @client.on(events.NewMessage(from_users=bot_id))
-        @client.on(events.MessageEdited(from_users=bot_id))
-        async def _handler(event):
+        async def _process(event, source: str):
             try:
-                text = event.message.message or ""
+                msg = event.message
+                # Bỏ qua tin cũ hơn thời điểm bật tool
+                if msg.date and msg.date < start_ts:
+                    return
+                # Chỉ xét tin của đúng bot mục tiêu
+                sender_id = getattr(msg, "sender_id", None)
+                if sender_id != bot_id:
+                    return
+                text = msg.message or ""
                 if trigger.lower() not in text.lower():
                     return
-                t = asyncio.create_task(schedule(event.message))
+                if msg.id in handled_ids:
+                    return
+                handled_ids.add(msg.id)
+                await log(f"[{tag}] 🔔 Khớp trigger qua {source} (msg_id={msg.id})")
+                t = asyncio.create_task(schedule(msg))
                 pending.add(t)
                 t.add_done_callback(pending.discard)
             except Exception as e:
-                await log(f"[{tag}] ❌ handler: {e}")
+                await log(f"[{tag}] ❌ handler {source}: {e}")
 
-        # Chạy tới khi stop
+        @client.on(events.NewMessage())
+        async def _on_new(event):
+            await _process(event, "NewMessage")
+
+        @client.on(events.MessageEdited())
+        async def _on_edit(event):
+            await _process(event, "MessageEdited")
+
+        # Chạy tới khi stop hoặc client disconnect
         stop_task = asyncio.create_task(stop_event.wait())
         disc_task = asyncio.create_task(client.disconnected)
-        done, _ = await asyncio.wait(
+        await asyncio.wait(
             {stop_task, disc_task}, return_when=asyncio.FIRST_COMPLETED
         )
         for t in (stop_task, disc_task):
