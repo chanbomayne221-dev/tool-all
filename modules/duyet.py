@@ -2,20 +2,20 @@
 
 Cách hoạt động:
 - Mở session telethon đã chọn.
-- Lắng nghe NewMessage + MessageEdited.
+- Lắng nghe NewMessage + MessageEdited liên tục cho đến khi user bấm STOP.
 - Chỉ xử lý tin có timestamp >= thời điểm BẬT TOOL (không quét tin cũ).
 - Khi text chứa trigger -> chờ `delay` giây, refetch message,
   tìm inline button có chữ "Duyệt" và bấm.
-- Chạy liên tục cho đến khi stop_event được set (bấm STOP).
+- Tự reconnect nếu Telethon rớt mạng tạm thời (không thoát tool).
 """
 import asyncio
-import time
 from datetime import datetime, timezone
 
-from telethon import events
+from telethon import events, TelegramClient
 from telethon.errors import FloodWaitError
 
-from .session_mgr import make_client
+from .session_mgr import session_path
+from config import API_ID, API_HASH
 
 
 async def _click_duyet(client, msg, button_text, log, tag):
@@ -49,10 +49,17 @@ async def _click_duyet(client, msg, button_text, log, tag):
 async def run_duyet(session_name, bot_username, delay, trigger, button_text,
                     stop_event, log):
     tag = session_name
-    client = make_client(session_name)
+    # Bật auto-reconnect để khi rớt mạng tạm thời, Telethon tự kết nối lại
+    # và update handlers vẫn tiếp tục nhận tin (không thoát tool).
+    client = TelegramClient(
+        session_path(session_name), API_ID, API_HASH,
+        connection_retries=None,        # retry vô hạn
+        retry_delay=2,
+        auto_reconnect=True,
+        request_retries=5,
+    )
     pending: set[asyncio.Task] = set()
     handled_ids: set[int] = set()  # dedupe NewMessage + MessageEdited
-    # Thời điểm bật tool – chỉ xử lý tin từ lúc này trở đi
     start_ts = datetime.now(timezone.utc)
 
     try:
@@ -78,7 +85,6 @@ async def run_duyet(session_name, bot_username, delay, trigger, button_text,
             await log(f"[{tag}] ⏳ Phát hiện lệnh nạp (msg_id={msg.id}), "
                       f"chờ {delay}s rồi bấm Duyệt…")
             try:
-                # chờ theo từng giây để stop ngay khi user bấm STOP
                 slept = 0.0
                 step = 0.5
                 while slept < delay:
@@ -95,10 +101,8 @@ async def run_duyet(session_name, bot_username, delay, trigger, button_text,
         async def _process(event, source: str):
             try:
                 msg = event.message
-                # Bỏ qua tin cũ hơn thời điểm bật tool
                 if msg.date and msg.date < start_ts:
                     return
-                # Chỉ xét tin của đúng bot mục tiêu
                 sender_id = getattr(msg, "sender_id", None)
                 if sender_id != bot_id:
                     return
@@ -123,17 +127,9 @@ async def run_duyet(session_name, bot_username, delay, trigger, button_text,
         async def _on_edit(event):
             await _process(event, "MessageEdited")
 
-        # Chạy tới khi stop hoặc client disconnect
-        stop_task = asyncio.create_task(stop_event.wait())
-        disc_task = asyncio.ensure_future(client.disconnected)
-        await asyncio.wait(
-            {stop_task, disc_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for t in (stop_task, disc_task):
-            if not t.done():
-                t.cancel()
+        # CHỈ thoát khi user bấm STOP. Nếu rớt mạng, auto_reconnect sẽ tự nối lại.
+        await stop_event.wait()
 
-        # Cancel pending click tasks
         for t in list(pending):
             t.cancel()
         if pending:
